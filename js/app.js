@@ -70,7 +70,7 @@ function h(tag, props = {}, ...children) {
 
 function showNotice(text, { action, onAction } = {}) {
   const box = $('notice');
-  box.replaceChildren(h('span', {}, text), action && h('button', { type: 'button', onclick: onAction }, action));
+  box.replaceChildren(h('span', {}, text), ...(action ? [h('button', { type: 'button', onclick: onAction }, action)] : []));
   box.hidden = false;
 }
 
