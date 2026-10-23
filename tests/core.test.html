@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="ko">
+<head><meta charset="utf-8"><title>core 테스트</title></head>
+<body>
+<pre id="out">실행 중…</pre>
+<script type="module">
+import { distanceM, walkMinutes, classify, buildPlaces, countByTab, quadrantBounds, cacheKey, pickRandom, walkUrl, includedPlaces, formatRadius } from '../js/core.js';
+
+const results = [];
+function test(name, fn) {
+  try { fn(); results.push(`PASS ${name}`); }
+  catch (e) { results.push(`FAIL ${name}: ${e.message}`); }
+}
+function eq(a, b) {
+  if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${JSON.stringify(a)} !== ${JSON.stringify(b)}`);
+}
+
+const center = { lat: 37.5, lng: 127.0 };
+const raw = (id, cat, group, dLatM = 0, extra = {}) => ({
+  id, place_name: `가게${id}`, category_name: cat, category_group_code: group,
+  y: String(center.lat + dLatM / 111320), x: String(center.lng), road_address_name: '도로명', address_name: '지번', phone: '', ...extra,
+});
+
+test('distanceM: 위도 0.001도 ≈ 111m', () => {
+  const d = distanceM(37.5, 127, 37.501, 127);
+  if (Math.abs(d - 111.2) > 1) throw new Error(String(d));
+});
+test('walkMinutes: 분당 67m 올림, 최소 1분', () => {
+  eq([walkMinutes(0), walkMinutes(67), walkMinutes(68), walkMinutes(500)], [1, 1, 2, 8]);
+});
+test('classify: 업종명 2단계로 탭 결정', () => {
+  eq(classify({ category_name: '음식점 > 일식 > 초밥,롤', category_group_code: 'FD6' }), 'japanese');
+  eq(classify({ category_name: '음식점 > 한식 > 국밥', category_group_code: 'FD6' }), 'korean');
+  eq(classify({ category_name: '음식점 > 패스트푸드 > 맥도날드', category_group_code: 'FD6' }), 'fastfood');
+});
+test('classify: CE7 그룹과 음식점 > 카페는 카페', () => {
+  eq(classify({ category_name: '음식점 > 카페 > 커피전문점', category_group_code: 'CE7' }), 'cafe');
+  eq(classify({ category_name: '음식점 > 카페', category_group_code: 'FD6' }), 'cafe');
+});
+test('classify: 모르는 업종은 기타, 술집은 숨김(null)', () => {
+  eq(classify({ category_name: '음식점 > 아시아음식 > 베트남음식', category_group_code: 'FD6' }), 'etc');
+  eq(classify({ category_name: '음식점 > 새업종', category_group_code: 'FD6' }), 'etc');
+  eq(classify({ category_name: '음식점 > 술집 > 호프', category_group_code: 'FD6' }), null);
+});
+test('buildPlaces: 중복 제거·숨김·반경 밖 제거·가까운 순', () => {
+  const a = [raw('1', '음식점 > 한식', 'FD6', 300), raw('2', '음식점 > 술집', 'FD6', 50), raw('3', '음식점 > 일식', 'FD6', 600)];
+  const b = [raw('1', '음식점 > 한식', 'FD6', 300), raw('4', '음식점 > 카페', 'CE7', 100)];
+  const out = buildPlaces([a, b], center, 500);
+  eq(out.map((p) => p.id), ['4', '1']);
+  eq(out[1].distance, 300);
+  eq(out[1].walk, 5);
+  eq(out[1].address, '도로명');
+  eq(out[1].url, 'https://place.map.kakao.com/1');
+});
+test('buildPlaces: 도로명 없으면 지번 주소', () => {
+  const out = buildPlaces([[raw('9', '음식점 > 분식', 'FD6', 10, { road_address_name: '' })]], center, 500);
+  eq(out[0].address, '지번');
+  eq(out[0].tab, 'snack');
+});
+test('countByTab: 전체와 탭별 개수', () => {
+  const c = countByTab([{ tab: 'korean' }, { tab: 'korean' }, { tab: 'cafe' }]);
+  eq([c.all, c.korean, c.cafe, c.japanese], [3, 2, 1, 0]);
+});
+test('quadrantBounds: 4개 사분면이 반경을 덮음', () => {
+  const q = quadrantBounds(center, 500);
+  eq(q.length, 4);
+  const [sw] = q[2]; const [, ne] = q[1];
+  if (Math.abs(distanceM(center.lat, center.lng, sw[0], center.lng) - 500) > 2) throw new Error('lat');
+  if (Math.abs(distanceM(center.lat, center.lng, center.lat, ne[1]) - 500) > 2) throw new Error('lng');
+});
+test('buildPlaces: place_url은 https로 바꿔 그대로 사용', () => {
+  const out = buildPlaces([[raw('7', '음식점 > 중식 > 중국요리', 'FD6', 10, { place_url: 'http://place.map.kakao.com/7' })]], center, 500);
+  eq(out[0].url, 'https://place.map.kakao.com/7');
+  eq([out[0].tab, out[0].detail], ['chinese', '중국요리']);
+
+});
+test('buildPlaces: 세부 업종은 3단계부터, 기타는 2단계부터', () => {
+  const out = buildPlaces([[
+    raw('a', '음식점 > 한식 > 국수 > 소호정', 'FD6', 10),
+    raw('b', '음식점 > 카페 > 커피전문점 > 스타벅스', 'CE7', 20),
+    raw('c', '음식점 > 아시아음식 > 동남아음식 > 베트남음식', 'FD6', 30),
+    raw('d', '음식점 > 일식', 'FD6', 40),
+    raw('e', '음식점 > 구내식당', 'FD6', 50),
+  ]], center, 500);
+  eq(out.map((p) => p.detail), ['국수 · 소호정', '커피전문점 · 스타벅스', '아시아음식 · 동남아음식 · 베트남음식', '', '구내식당']);
+  eq(out[4].tab, 'etc');
+});
+test('pickRandom: 직전 결과는 빼고 뽑음', () => {
+  const c = [{ id: 'a' }, { id: 'b' }];
+  for (let i = 0; i < 20; i++) eq(pickRandom(c, 'a').id, 'b');
+  eq(pickRandom(c, null, () => 0.99).id, 'b');
+});
+test('pickRandom: 후보가 하나면 직전 결과여도 그대로, 없으면 null', () => {
+  eq(pickRandom([{ id: 'a' }], 'a').id, 'a');
+  eq(pickRandom([], null), null);
+});
+test('walkUrl: 도보 링크, 이름의 쉼표·슬래시 제거', () => {
+  const url = walkUrl({ lat: 37.5, lng: 127 }, { name: '김밥,떡볶이/본점', lat: 37.501, lng: 127.001 });
+  eq(url, `https://map.kakao.com/link/by/walk/${encodeURIComponent('내 위치')},37.5,127/${encodeURIComponent('김밥 떡볶이 본점')},37.501,127.001`);
+});
+test('includedPlaces: 제외한 카테고리만 빠짐', () => {
+  const ps = [{ id: '1', tab: 'cafe' }, { id: '2', tab: 'korean' }, { id: '3', tab: 'etc' }];
+  eq(includedPlaces(ps, new Set(['cafe', 'etc'])).map((p) => p.id), ['2']);
+  eq(includedPlaces(ps, new Set()).length, 3);
+});
+test('includedPlaces: 숨긴 장소도 빠짐', () => {
+  const ps = [{ id: '1', tab: 'cafe' }, { id: '2', tab: 'korean' }, { id: '3', tab: 'korean' }];
+  eq(includedPlaces(ps, new Set(['cafe']), new Set(['3'])).map((p) => p.id), ['2']);
+  eq(includedPlaces(ps, new Set(), new Set(['1'])).map((p) => p.id), ['2', '3']);
+});
+test('formatRadius: m과 km 표기', () => {
+  eq([formatRadius(300), formatRadius(500), formatRadius(1000)], ['300m', '500m', '1km']);
+});
+test('cacheKey: 소수 4자리 반올림', () => {
+  eq(cacheKey({ lat: 37.123456, lng: 127.98765 }, 500), 'search:37.1235,127.9877,500');
+});
+
+const failed = results.filter((r) => r.startsWith('FAIL')).length;
+document.getElementById('out').textContent = results.join('\n') + `\n\n${failed ? `FAILED ${failed}` : 'ALL PASSED'} (${results.length})`;
+</script>
+</body>
+</html>
